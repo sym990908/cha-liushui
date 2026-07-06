@@ -13,13 +13,15 @@ const pdfCache = new Map<string, PDFDocumentProxy>()
 const pageBaseCanvasCache = new Map<string, HTMLCanvasElement>()
 const pageBaseRenderInflight = new Map<string, Promise<HTMLCanvasElement>>()
 
-/** 渲染倍率（2× 提升 OCR 识别率） */
-export const PDF_NATIVE_SCALE = 2
+/** 预览渲染倍率（1×，与 OCR 坐标一致） */
+export const PDF_NATIVE_SCALE = 1
+/** OCR 上传默认倍率（1×，降低 Netlify 提交耗时） */
+export const OCR_RENDER_SCALE = 1
 
 /** Netlify Function 请求体上限约 6MB，二进制有效约 4.5MB，留安全余量 */
 export const OCR_MAX_BYTES = 3_800_000
-/** 重试 OCR 上传：最长边与体积上限 */
-export const OCR_RETRY_MAX_LONG_EDGE = 2560
+/** 失败重试 OCR：最长边与体积上限 */
+export const OCR_RETRY_MAX_LONG_EDGE = 2048
 export const OCR_RETRY_MAX_BYTES = 2_000_000
 
 const OPS = {

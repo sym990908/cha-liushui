@@ -11,6 +11,8 @@ interface Props {
   onChange: (table: StatementTable) => void
   onSelectionChange?: (rows: number[]) => void
   selectedRows?: number[]
+  selectedColumn?: number | null
+  onSelectColumn?: (colIndex: number | null) => void
 }
 
 export function StatementTableEditor({
@@ -18,6 +20,8 @@ export function StatementTableEditor({
   onChange,
   onSelectionChange,
   selectedRows = [],
+  selectedColumn = null,
+  onSelectColumn,
 }: Props) {
   const selectedRef = useRef<Set<number>>(new Set(selectedRows))
   const [columnFilters, setColumnFilters] = useState<ColumnFilterState[]>(() =>
@@ -79,12 +83,20 @@ export function StatementTableEditor({
           <tr>
             <th className="w-10 border border-slate-200 px-1 py-1 text-xs text-slate-400">#</th>
             {table.headers.map((h, ci) => (
-              <th key={ci} className="min-w-[120px] border border-slate-200 p-0">
-                <div className="flex items-center gap-0.5 px-1">
+              <th
+                key={ci}
+                className={`min-w-[120px] cursor-pointer border border-slate-200 p-0 ${
+                  selectedColumn === ci ? 'bg-blue-100 ring-2 ring-inset ring-blue-400' : ''
+                }`}
+                onClick={() => onSelectColumn?.(selectedColumn === ci ? null : ci)}
+              >
+                <div className="flex items-center gap-0.5 px-1" onClick={(e) => e.stopPropagation()}>
                   <input
                     value={h}
                     onChange={(e) => updateHeader(ci, e.target.value)}
-                    className="min-w-0 flex-1 bg-transparent px-1 py-1.5 text-left font-semibold text-slate-700 outline-none focus:bg-blue-50"
+                    onFocus={() => onSelectColumn?.(ci)}
+                    placeholder="列名"
+                    className="min-w-0 flex-1 bg-transparent px-1 py-1.5 text-left font-semibold text-slate-700 outline-none placeholder:font-normal placeholder:text-slate-400 focus:bg-blue-50"
                   />
                   <ColumnFilterMenu
                     columnIndex={ci}

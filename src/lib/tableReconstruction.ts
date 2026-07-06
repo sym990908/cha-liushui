@@ -188,16 +188,6 @@ function mergeWrappedRows(rows: StatementRow[]): StatementRow[] {
   return merged
 }
 
-function headersSimilar(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) return false
-  let match = 0
-  for (let i = 0; i < a.length; i++) {
-    if (a[i].trim() === b[i].trim()) match++
-    else if (a[i].includes(b[i]) || b[i].includes(a[i])) match++
-  }
-  return match / a.length >= 0.8
-}
-
 function buildPageTable(page: OcrPage, boundaries: number[], columnCount: number): StatementRow[] {
   const blocks = page.blocks
     .filter((b) => b.bbox.length >= 4)
@@ -225,7 +215,7 @@ export function reconstructStatementTable(doc: OcrDocument): StatementTable {
   const allBlocks = collectBlocks(doc)
   if (allBlocks.length === 0) {
     return {
-      headers: ['列1', '列2', '列3', '列4'],
+      headers: ['', '', '', ''],
       rows: [],
       columnCount: 4,
       generatedAt: new Date().toISOString(),
@@ -239,44 +229,23 @@ export function reconstructStatementTable(doc: OcrDocument): StatementTable {
 
   const donePages = doc.pages.filter((p) => p.status === 'done' && p.blocks.length > 0)
   let allRows: StatementRow[] = []
-  let headers: string[] = []
-  let headerFound = false
 
   for (const page of donePages) {
     let pageRows = buildPageTable(page, boundaries, columnCount)
-
     pageRows = mergeWrappedRows(pageRows)
-
-    if (pageRows.length > 0 && pageRows[0].isHeader) {
-      const candidateHeaders = pageRows[0].cells.map((c) => c.text || `列${c.id.slice(0, 4)}`)
-      if (!headerFound) {
-        headers = candidateHeaders
-        headerFound = true
-        pageRows = pageRows.slice(1)
-      } else if (headersSimilar(headers, candidateHeaders)) {
-        pageRows = pageRows.slice(1)
-      }
-    }
-
     pageRows = pageRows.filter((r) => !isEmptyRow(r.cells))
     allRows = allRows.concat(pageRows)
   }
 
-  if (!headerFound) {
-    headers = Array.from({ length: columnCount }, (_, i) => `列${i + 1}`)
-  }
-
-  while (headers.length < columnCount) {
-    headers.push(`列${headers.length + 1}`)
-  }
+  const headers = Array.from({ length: columnCount }, () => '')
 
   return {
-    headers: headers.slice(0, columnCount),
+    headers,
     rows: allRows,
     columnCount,
     generatedAt: new Date().toISOString(),
     sourcePages: donePages.map((p) => p.pageIndex),
-    needsReview: !headerFound,
+    needsReview: true,
   }
 }
 
@@ -295,7 +264,7 @@ export function setFirstRowAsHeader(table: StatementTable): StatementTable {
   const first = table.rows[0]
   return {
     ...table,
-    headers: first.cells.map((c, i) => c.text.trim() || table.headers[i] || `列${i + 1}`),
+    headers: first.cells.map((c, i) => c.text.trim() || table.headers[i] || ''),
     rows: table.rows.slice(1),
     needsReview: false,
   }
@@ -313,7 +282,7 @@ export function normalizeTable(table: StatementTable): StatementTable {
   const columnCount = table.columnCount
   const headers = [...table.headers]
   while (headers.length < columnCount) {
-    headers.push(`列${headers.length + 1}`)
+    headers.push('')
   }
   return {
     ...table,
@@ -325,18 +294,10 @@ export function normalizeTable(table: StatementTable): StatementTable {
   }
 }
 
-export function mergeSelectedRows(table: StatementTable, rowIndices: number[]): StatementTable {
-  if (rowIndices.length < 2) return table
-  const normalized = normalizeTable(table)
-  const sorted = [...rowIndices].sort((a, b) => a - b)
-  const colCount = normalized.columnCount
-  const firstIdx = sorted[0]
-  const firstRow = normalized.rows[firstIdx]
-
-  // 将 n 行按行序横向拉伸为一行：每行各列依次拼接，列数 = n × 原列数
+function mergeRowGroup(rows: StatementRow[], colCount: number): StatementRow {
   const stretchedCells: StatementCell[] = []
-  for (const rowIdx of sorted) {
-    const rowCells = normalizeRowCells(normalized.rows[rowIdx], colCount)
+  for (const row of rows) {
+    const rowCells = normalizeRowCells(row, colCount)
     for (const cell of rowCells) {
       stretchedCells.push({
         ...cell,
@@ -345,32 +306,46 @@ export function mergeSelectedRows(table: StatementTable, rowIndices: number[]): 
       })
     }
   }
+  return {
+    ...rows[0],
+    id: uuidv4(),
+    cells: stretchedCells,
+    mergedRowCount: rows.length,
+  }
+}
 
-  const newColumnCount = stretchedCells.length
+/** 以选中行数为每组大小，对整张表按组横向合并（如选 2 行则每 2 行合并为一行） */
+export function mergeSelectedRows(table: StatementTable, rowIndices: number[]): StatementTable {
+  if (rowIndices.length < 2) return table
+  const normalized = normalizeTable(table)
+  const groupSize = rowIndices.length
+  const colCount = normalized.columnCount
+  const newColumnCount = colCount * groupSize
   const newHeaders = [...normalized.headers]
   for (let i = colCount; i < newColumnCount; i++) {
-    newHeaders.push(`列${i + 1}`)
+    newHeaders.push('')
   }
 
-  const mergedRow: StatementRow = {
-    ...firstRow,
-    cells: stretchedCells,
-    mergedRowCount: sorted.length,
+  const mergedRows: StatementRow[] = []
+  for (let i = 0; i < normalized.rows.length; i += groupSize) {
+    const chunk = normalized.rows.slice(i, i + groupSize)
+    if (chunk.length === groupSize) {
+      mergedRows.push(mergeRowGroup(chunk, colCount))
+    } else {
+      for (const row of chunk) {
+        mergedRows.push({
+          ...row,
+          cells: normalizeRowCells(row, newColumnCount),
+        })
+      }
+    }
   }
-
-  const removeSet = new Set(sorted)
-  const rowsWithoutMerged = normalized.rows.filter((_, idx) => !removeSet.has(idx))
-  const insertAt = sorted.filter((x) => x < firstIdx).length
-  rowsWithoutMerged.splice(insertAt, 0, mergedRow)
 
   return {
     ...normalized,
     columnCount: newColumnCount,
     headers: newHeaders.slice(0, newColumnCount),
-    rows: rowsWithoutMerged.map((row) => ({
-      ...row,
-      cells: normalizeRowCells(row, newColumnCount),
-    })),
+    rows: mergedRows,
   }
 }
 
@@ -420,7 +395,7 @@ export function insertTableColumn(table: StatementTable): StatementTable {
   return {
     ...table,
     columnCount: colIdx + 1,
-    headers: [...table.headers, `列${colIdx + 1}`],
+    headers: [...table.headers, ''],
     rows: table.rows.map((row) => ({
       ...row,
       cells: [...row.cells, { id: uuidv4(), text: '' }],

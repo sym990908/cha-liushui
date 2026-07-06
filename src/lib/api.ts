@@ -10,8 +10,8 @@ const OCR_SUBMIT_TIMEOUT_MS = 28_000
 const OCR_LONG_POLL_TIMEOUT_MS = 27_000
 const OCR_POLL_GAP_MS = 200
 
-/** PDF 首次失败后以 1× 渲染重试一次（首次为 2×） */
-export const OCR_PDF_RETRY_RENDER_SCALE = 1
+/** PDF 默认 1× OCR；失败重试时压缩至最长边 2048 / 2MB */
+export const OCR_PDF_RENDER_SCALE = 1
 
 export interface OcrApiErrorBody {
   error: string

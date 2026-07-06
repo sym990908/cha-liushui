@@ -3,7 +3,7 @@ import { ArrowLeft, Download, FileJson, AlertCircle } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { useApp } from '../../store/AppContext'
-import { ocrPageBlob, OCR_PDF_RETRY_RENDER_SCALE, parseTransactions, inferTableSchema, type OcrBatchProgress, type OcrPageResult } from '../../lib/api'
+import { ocrPageBlob, OCR_PDF_RENDER_SCALE, parseTransactions, inferTableSchema, type OcrBatchProgress, type OcrPageResult } from '../../lib/api'
 import {
   loadPdfDocument,
   getCachedPdf,
@@ -15,6 +15,7 @@ import {
   renderImageThumbnail,
   mapBboxToPreview,
   PDF_NATIVE_SCALE,
+  OCR_RENDER_SCALE,
   OCR_RETRY_MAX_LONG_EDGE,
   OCR_RETRY_MAX_BYTES,
 } from '../../lib/pdfUtils'
@@ -74,6 +75,7 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
   const [compressHint, setCompressHint] = useState('')
   const [isPreviewRendering, setIsPreviewRendering] = useState(false)
   const [selectedTableRows, setSelectedTableRows] = useState<number[]>([])
+  const [selectedTableColumn, setSelectedTableColumn] = useState<number | null>(null)
   const renderGenRef = useRef(0)
   const previewUrlRef = useRef<string | undefined>(undefined)
   const [aiLoading, setAiLoading] = useState(false)
@@ -223,6 +225,7 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
     const page = doc.pages[pageIndex]
     const file = sourceFileRef.current
     let canvas: HTMLCanvasElement
+    const pdfRenderScale = options?.pdfRenderScale ?? OCR_RENDER_SCALE
 
     if (doc.fileType === 'pdf') {
       if (!pdfRef.current) throw new Error('PDF 尚未加载完成')
@@ -230,7 +233,7 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
         pdfRef.current,
         pageIndex,
         page.rotation,
-        options?.pdfRenderScale ?? PDF_NATIVE_SCALE,
+        pdfRenderScale,
         doc.fileId,
       )
       canvas = result.canvas
@@ -258,7 +261,22 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
       prepareOptions,
     )
 
-    return { pageIndex, payload, previewWidth: canvas.width, previewHeight: canvas.height }
+    /** bbox 映射到预览坐标（预览与 OCR 均为 1×） */
+    let previewWidth = page.naturalWidth
+    let previewHeight = page.naturalHeight
+    if ((!previewWidth || !previewHeight) && doc.fileType === 'pdf' && pdfRef.current) {
+      const vp = (await pdfRef.current.getPage(pageIndex + 1)).getViewport({
+        scale: PDF_NATIVE_SCALE,
+        rotation: page.rotation,
+      })
+      previewWidth = vp.width
+      previewHeight = vp.height
+    } else if (!previewWidth || !previewHeight) {
+      previewWidth = canvas.width
+      previewHeight = canvas.height
+    }
+
+    return { pageIndex, payload, previewWidth, previewHeight }
   }
 
   const retryOcrPage = async (
@@ -270,9 +288,9 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
     }
 
     try {
-      console.info('[ocr] retry with 1x render', { pageIndex: pageIndex + 1, firstError: firstError.message })
+      console.info('[ocr] retry with compression', { pageIndex: pageIndex + 1, firstError: firstError.message })
       const retryRendered = await renderPageForOcr(pageIndex, {
-        pdfRenderScale: OCR_PDF_RETRY_RENDER_SCALE,
+        pdfRenderScale: OCR_PDF_RENDER_SCALE,
         isRetry: true,
       })
       const result = await ocrPageBlob(
@@ -283,8 +301,8 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
       )
       setCompressHint(
         retryRendered.payload.compressed
-          ? '重试已用 1× 渲染，并按最长边 2560px / 2MB 限制压缩，bbox 已同步映射'
-          : '识别失败页已以 1× 分辨率重试成功，bbox 已同步映射',
+          ? '重试已按最长边 2048px / 2MB 压缩上传，bbox 已同步映射'
+          : '识别失败页已重试成功，bbox 已同步映射',
       )
       return {
         result,
@@ -711,6 +729,7 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
             <TableEditorToolbar
               table={doc.statementTable}
               selectedRows={selectedTableRows}
+              selectedColumn={selectedTableColumn}
               onUndo={handleUndo}
               onRedo={handleRedo}
               canUndo={tableHistory.canUndo}
@@ -726,9 +745,12 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
                 applyTableOp((t) => deleteTableRows(t, selectedTableRows))
               }
               onInsertColumn={() => applyTableOp((t) => insertTableColumn(t))}
-              onDeleteColumn={() =>
-                applyTableOp((t) => deleteTableColumn(t, t.columnCount - 1))
-              }
+              onDeleteColumn={() => {
+                if (selectedTableColumn == null) return
+                const col = selectedTableColumn
+                applyTableOp((t) => deleteTableColumn(t, col))
+                setSelectedTableColumn(null)
+              }}
               onAiAssist={handleAiAssist}
               onExportCsv={() =>
                 exportStatementTableCsv(doc.statementTable!, doc.fileName)
@@ -739,13 +761,14 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
               onConfirm={handleConfirm}
               aiLoading={aiLoading}
               confirmLoading={parseRunning}
-              showAiAssist={doc.statementTable.needsReview}
             />
             <StatementTableEditor
               table={doc.statementTable}
               onChange={updateTable}
               onSelectionChange={setSelectedTableRows}
               selectedRows={selectedTableRows}
+              selectedColumn={selectedTableColumn}
+              onSelectColumn={setSelectedTableColumn}
             />
             {confirmError && <p className="text-xs text-red-600">{confirmError}</p>}
           </div>

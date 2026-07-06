@@ -22,9 +22,9 @@ interface Props {
   onRedo?: () => void
   canUndo?: boolean
   canRedo?: boolean
+  selectedColumn?: number | null
   aiLoading?: boolean
   confirmLoading?: boolean
-  showAiAssist?: boolean
 }
 
 export function TableEditorToolbar({
@@ -44,9 +44,9 @@ export function TableEditorToolbar({
   onRedo,
   canUndo,
   canRedo,
+  selectedColumn,
   aiLoading,
   confirmLoading,
-  showAiAssist,
 }: Props) {
   const btn =
     'flex items-center gap-1 rounded border border-slate-300 px-2 py-1.5 text-xs hover:bg-slate-50 disabled:opacity-50'
@@ -60,7 +60,7 @@ export function TableEditorToolbar({
         <button type="button" className={btn} onClick={onRedo} disabled={!canRedo}>
           <Redo2 size={14} /> 重做
         </button>
-        <button type="button" className={btn} onClick={onMergeRows} disabled={selectedRows.length < 2} title="将选中行横向拼接为一行，列数随之增加">
+        <button type="button" className={btn} onClick={onMergeRows} disabled={selectedRows.length < 2} title="以选中行数为每组大小，整张表按组横向合并（如选 2 行则每 2 行合并为一行，列数翻倍）">
           <Merge size={14} /> 合并选中行
         </button>
         <button type="button" className={btn} onClick={onSetHeader} disabled={table.rows.length === 0}>
@@ -75,15 +75,18 @@ export function TableEditorToolbar({
         <button type="button" className={btn} onClick={onInsertColumn}>
           <Plus size={14} /> 插入列
         </button>
-        <button type="button" className={btn} onClick={onDeleteColumn} disabled={table.columnCount <= 1}>
-          <Trash2 size={14} /> 删除末列
+        <button
+          type="button"
+          className={btn}
+          onClick={onDeleteColumn}
+          disabled={table.columnCount <= 1 || selectedColumn == null}
+        >
+          <Trash2 size={14} /> 删除选中列
         </button>
-        {showAiAssist && (
-          <button type="button" className={btn} onClick={onAiAssist} disabled={aiLoading}>
-            {aiLoading ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-            AI 辅助表头
-          </button>
-        )}
+        <button type="button" className={btn} onClick={onAiAssist} disabled={aiLoading}>
+          {aiLoading ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+          AI 辅助表头
+        </button>
       </div>
 
       <div className="flex flex-wrap gap-2">
