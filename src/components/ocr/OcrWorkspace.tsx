@@ -37,6 +37,7 @@ import {
   parseTableToTransactions,
 } from '../../lib/tableReconstruction'
 import { useTableHistory } from '../../hooks/useTableHistory'
+import { useOcrBlockHistory } from '../../hooks/useOcrBlockHistory'
 import { goProjectHome } from '../../lib/navigation'
 import { PageToolbar } from './PageToolbar'
 import { PdfPreview } from './PdfPreview'
@@ -78,9 +79,99 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
   const [selectedTableRows, setSelectedTableRows] = useState<number[]>([])
   const [selectedTableColumn, setSelectedTableColumn] = useState<number | null>(null)
   const renderGenRef = useRef(0)
+  const selectedBlockIdRef = useRef<string | undefined>(selectedBlockId)
+  selectedBlockIdRef.current = selectedBlockId
   const previewUrlRef = useRef<string | undefined>(undefined)
   const [aiLoading, setAiLoading] = useState(false)
   const tableHistory = useTableHistory()
+  const blockHistory = useOcrBlockHistory()
+  const blockHistoryRef = useRef(blockHistory)
+  blockHistoryRef.current = blockHistory
+  const currentPageRef = useRef(currentPage)
+  currentPageRef.current = currentPage
+  const docRef = useRef(doc)
+  docRef.current = doc
+  /** 同一块连续编辑只入栈一次，避免每个按键都占历史 */
+  const editSnapshotBlockIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    blockHistory.reset()
+    setSelectedBlockId(undefined)
+    editSnapshotBlockIdRef.current = null
+  }, [currentPage, doc.fileId, blockHistory.reset])
+
+  useEffect(() => {
+    const isEditableTarget = (target: EventTarget | null) =>
+      target instanceof HTMLElement &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable)
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      const page = docRef.current.pages[currentPageRef.current]
+      const blocks = page?.blocks ?? []
+      const history = blockHistoryRef.current
+
+      // Ctrl/Cmd+Z 撤销 OCR 块删除或文本修改；输入框内交给原生撤销
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'z') {
+        if (isEditableTarget(e.target)) return
+        e.preventDefault()
+        if (e.shiftKey) {
+          const next = history.redo(blocks)
+          if (!next) return
+          dispatch({
+            type: 'UPDATE_OCR_PAGE',
+            fileId: docRef.current.fileId,
+            pageIndex: currentPageRef.current,
+            updates: { blocks: next },
+          })
+          return
+        }
+        const prev = history.undo(blocks)
+        if (!prev) return
+        dispatch({
+          type: 'UPDATE_OCR_PAGE',
+          fileId: docRef.current.fileId,
+          pageIndex: currentPageRef.current,
+          updates: { blocks: prev },
+        })
+        return
+      }
+
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'y') {
+        if (isEditableTarget(e.target)) return
+        e.preventDefault()
+        const next = history.redo(blocks)
+        if (!next) return
+        dispatch({
+          type: 'UPDATE_OCR_PAGE',
+          fileId: docRef.current.fileId,
+          pageIndex: currentPageRef.current,
+          updates: { blocks: next },
+        })
+        return
+      }
+
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return
+      const blockId = selectedBlockIdRef.current
+      if (!blockId) return
+      if (isEditableTarget(e.target)) return
+
+      e.preventDefault()
+      history.pushSnapshot(blocks)
+      dispatch({
+        type: 'DELETE_OCR_BLOCK',
+        fileId: docRef.current.fileId,
+        pageIndex: currentPageRef.current,
+        blockId,
+      })
+      setSelectedBlockId(undefined)
+      setHoveredBlockId((hovered) => (hovered === blockId ? undefined : hovered))
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [dispatch])
 
   const parseRunning =
     state.parseJob?.fileId === doc.fileId && state.parseJob.status === 'running'
@@ -128,7 +219,7 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
         throw new Error('缺少源文件，请返回重新上传')
       }
 
-      const blobUrl = canvasToBlobUrl(canvas)
+      const blobUrl = await canvasToBlobUrl(canvas)
       if (gen !== renderGenRef.current) {
         URL.revokeObjectURL(blobUrl)
         return
@@ -262,17 +353,10 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
       prepareOptions,
     )
 
-    /** bbox 映射到预览坐标（预览与 OCR 均为 1×） */
+    /** bbox 映射到预览坐标：优先用已渲染预览尺寸，否则用本次 canvas（与预览同倍率） */
     let previewWidth = page.naturalWidth
     let previewHeight = page.naturalHeight
-    if ((!previewWidth || !previewHeight) && doc.fileType === 'pdf' && pdfRef.current) {
-      const vp = (await pdfRef.current.getPage(pageIndex + 1)).getViewport({
-        scale: PDF_NATIVE_SCALE,
-        rotation: page.rotation,
-      })
-      previewWidth = vp.width
-      previewHeight = vp.height
-    } else if (!previewWidth || !previewHeight) {
+    if (!previewWidth || !previewHeight) {
       previewWidth = canvas.width
       previewHeight = canvas.height
     }
@@ -283,7 +367,10 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
   const retryOcrPage = async (
     pageIndex: number,
     firstError: Error,
-  ): Promise<{ result: OcrPageResult; ocrWidth: number; ocrHeight: number } | { error: Error }> => {
+  ): Promise<
+    | { result: OcrPageResult; ocrWidth: number; ocrHeight: number; padX: number; padY: number }
+    | { error: Error }
+  > => {
     if (doc.fileType !== 'pdf') {
       return { error: firstError }
     }
@@ -309,6 +396,8 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
         result,
         ocrWidth: retryRendered.payload.width,
         ocrHeight: retryRendered.payload.height,
+        padX: retryRendered.payload.padX,
+        padY: retryRendered.payload.padY,
       }
     } catch (err) {
       return { error: err instanceof Error ? err : firstError }
@@ -322,6 +411,8 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
     previewHeight: number,
     ocrWidth: number,
     ocrHeight: number,
+    padX = 0,
+    padY = 0,
   ) => {
     if (result instanceof Error) {
       dispatch({
@@ -336,7 +427,15 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
     const blocks: OcrBlock[] = result.blocks.map((b) => ({
       ...b,
       id: uuidv4(),
-      bbox: mapBboxToPreview(b.bbox, ocrWidth, ocrHeight, previewWidth, previewHeight),
+      bbox: mapBboxToPreview(
+        b.bbox,
+        ocrWidth,
+        ocrHeight,
+        previewWidth,
+        previewHeight,
+        padX,
+        padY,
+      ),
     }))
     dispatch({
       type: 'UPDATE_OCR_PAGE',
@@ -351,6 +450,10 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
         error: undefined,
       },
     })
+    if (pageIndex === currentPageRef.current) {
+      blockHistoryRef.current.reset()
+      editSnapshotBlockIdRef.current = null
+    }
     return true
   }
 
@@ -387,6 +490,8 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
           const { previewWidth, previewHeight } = rendered
           let ocrWidth = rendered.payload.width
           let ocrHeight = rendered.payload.height
+          let padX = rendered.payload.padX
+          let padY = rendered.payload.padY
 
           let result: OcrPageResult | Error
           try {
@@ -405,6 +510,8 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
               result = retried.result
               ocrWidth = retried.ocrWidth
               ocrHeight = retried.ocrHeight
+              padX = retried.padX
+              padY = retried.padY
             } else {
               result = retried.error
             }
@@ -417,6 +524,8 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
             previewHeight,
             ocrWidth,
             ocrHeight,
+            padX,
+            padY,
           )
           if (!ok) failed++
         } catch (err) {
@@ -663,7 +772,10 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
             naturalHeight={previewSize.height || activePage?.naturalHeight || 0}
             selectedBlockId={selectedBlockId}
             hoveredBlockId={hoveredBlockId}
-            onSelectBlock={setSelectedBlockId}
+            onSelectBlock={(blockId) => {
+              setSelectedBlockId(blockId)
+              editSnapshotBlockIdRef.current = null
+            }}
             onHoverBlock={setHoveredBlockId}
           />
         }
@@ -674,9 +786,21 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
             naturalHeight={previewSize.height || activePage?.naturalHeight || 0}
             selectedBlockId={selectedBlockId}
             hoveredBlockId={hoveredBlockId}
-            onSelectBlock={setSelectedBlockId}
+            onSelectBlock={(blockId) => {
+              setSelectedBlockId(blockId)
+              editSnapshotBlockIdRef.current = null
+            }}
             onHoverBlock={setHoveredBlockId}
-            onEditBlock={(blockId, text) =>
+            onEditBlock={(blockId, text) => {
+              const page = doc.pages[currentPage]
+              if (!page) return
+              const prev = page.blocks.find((b) => b.id === blockId)
+              const prevText = prev ? (prev.editedText ?? prev.text) : undefined
+              if (prevText === text) return
+              if (editSnapshotBlockIdRef.current !== blockId) {
+                blockHistory.pushSnapshot(page.blocks)
+                editSnapshotBlockIdRef.current = blockId
+              }
               dispatch({
                 type: 'UPDATE_OCR_BLOCK',
                 fileId: doc.fileId,
@@ -684,7 +808,7 @@ export function OcrWorkspace({ document: initialDoc }: Props) {
                 blockId,
                 editedText: text,
               })
-            }
+            }}
           />
         }
       />

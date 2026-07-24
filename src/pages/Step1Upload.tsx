@@ -4,20 +4,49 @@ import { FileUpload } from '../components/FileUpload'
 import { ProjectRecordsPanel } from '../components/ProjectRecordsPanel'
 import { OcrWorkspace } from '../components/ocr/OcrWorkspace'
 import { getAnalyzableFiles, countTransactionsByFile } from '../lib/analysisScope'
+import { createOcrDocumentFromFile } from '../lib/ocrDocument'
+import { getCachedFile } from '../lib/fileCache'
 import {
   CheckCircle, FileIcon, Loader2, XCircle, Scan, Trash2, BarChart3,
 } from 'lucide-react'
+import type { UploadedFile } from '../types'
+
+function isOcrUploadName(name: string) {
+  return /\.(pdf|png|jpe?g|webp|bmp)$/i.test(name)
+}
 
 export function Step1Upload() {
   const { state, dispatch } = useApp()
   const analyzable = useMemo(() => getAnalyzableFiles(state.files), [state.files])
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [enteringId, setEnteringId] = useState<string>()
 
   const activeDoc = state.ocrDocuments.find((d) => d.fileId === state.activeOcrFileId)
 
-  const enterWorkspace = (fileId: string) => {
-    dispatch({ type: 'SET_ACTIVE_OCR_FILE', fileId })
-    dispatch({ type: 'SET_STEP1_PHASE', phase: 'workspace' })
+  const enterWorkspace = async (file: UploadedFile) => {
+    if (enteringId) return
+    setEnteringId(file.id)
+    try {
+      const existing = state.ocrDocuments.find((d) => d.fileId === file.id)
+      if (!existing) {
+        const cached = getCachedFile(file.id)
+        if (!cached) {
+          alert('源文件已失效（刷新页面后需重新上传该 PDF/图片，才能继续 OCR）')
+          return
+        }
+        const doc = await createOcrDocumentFromFile(
+          cached,
+          file.id,
+          file.sourcePlatform || '其他',
+        )
+        dispatch({ type: 'SET_OCR_DOCUMENT', document: doc })
+        return
+      }
+      dispatch({ type: 'SET_ACTIVE_OCR_FILE', fileId: file.id })
+      dispatch({ type: 'SET_STEP1_PHASE', phase: 'workspace' })
+    } finally {
+      setEnteringId(undefined)
+    }
   }
 
   const toggleSelect = (fileId: string) => {
@@ -115,9 +144,17 @@ export function Step1Upload() {
 
           <ul className="space-y-2">
             {state.files.map((f) => {
-              const hasOcrDoc = state.ocrDocuments.some((d) => d.fileId === f.id)
+              const canOcr = isOcrUploadName(f.name)
               const canAnalyze = analyzable.some((a) => a.id === f.id)
               const txCount = countTransactionsByFile(state.transactions, f.id)
+              const ocrDoc = state.ocrDocuments.find((d) => d.fileId === f.id)
+              const partialOcr =
+                canOcr &&
+                (f.status === 'ocr_review' ||
+                  Boolean(f.needsOcrReview) ||
+                  Boolean(ocrDoc?.pages.some((p) => p.status !== 'done' && p.status !== 'skipped')))
+              const ocrLabel = partialOcr ? '继续 OCR' : 'OCR 编辑'
+              const busy = enteringId === f.id
 
               return (
                 <li key={f.id} className="rounded-lg bg-slate-50 px-3 py-2">
@@ -132,27 +169,56 @@ export function Step1Upload() {
                         />
                       )}
                       <FileIcon size={16} className="shrink-0 text-slate-400" />
-                      <span className="truncate text-sm text-slate-800">{f.name}</span>
+                      {canOcr ? (
+                        <button
+                          type="button"
+                          onClick={() => void enterWorkspace(f)}
+                          disabled={busy}
+                          className="truncate text-left text-sm text-slate-800 hover:text-blue-700 hover:underline disabled:opacity-50"
+                          title={ocrLabel}
+                        >
+                          {f.name}
+                        </button>
+                      ) : (
+                        <span className="truncate text-sm text-slate-800">{f.name}</span>
+                      )}
                       <span className="shrink-0 text-xs text-slate-400">({f.sourcePlatform})</span>
                     </div>
                     <div className="flex shrink-0 items-center gap-2 text-sm">
                       {f.status === 'processing' && (
                         <Loader2 size={14} className="animate-spin text-blue-500" />
                       )}
+                      {busy && <Loader2 size={14} className="animate-spin text-blue-500" />}
                       {canAnalyze && (
-                        <span className="flex items-center gap-1 text-green-600 text-xs">
-                          <CheckCircle size={14} /> {f.transactionCount ?? txCount} 笔
-                        </span>
-                      )}
-                      {hasOcrDoc && (
                         <button
-                          onClick={() => enterWorkspace(f.id)}
-                          className="flex items-center gap-1 text-xs text-blue-600 hover:underline"
+                          type="button"
+                          onClick={() => {
+                            if (canOcr) void enterWorkspace(f)
+                          }}
+                          disabled={!canOcr || busy}
+                          className={`flex items-center gap-1 text-xs text-green-600 ${
+                            canOcr ? 'hover:underline disabled:opacity-50' : 'cursor-default'
+                          }`}
+                          title={canOcr ? ocrLabel : undefined}
                         >
-                          <Scan size={14} /> OCR 编辑
+                          <CheckCircle size={14} /> {f.transactionCount ?? txCount} 笔
+                        </button>
+                      )}
+                      {partialOcr && !canAnalyze && (
+                        <span className="text-xs text-amber-600">OCR 未完成</span>
+                      )}
+                      {canOcr && (
+                        <button
+                          type="button"
+                          onClick={() => void enterWorkspace(f)}
+                          disabled={busy}
+                          className="flex items-center gap-1 text-xs text-blue-600 hover:underline disabled:opacity-50"
+                        >
+                          <Scan size={14} /> {ocrLabel}
                         </button>
                       )}
                       <button
+                        type="button"
                         onClick={() => deleteFile(f.id)}
                         className="flex items-center gap-1 text-xs text-red-600 hover:underline"
                       >
@@ -173,6 +239,7 @@ export function Step1Upload() {
           {selectedIds.size > 0 && (
             <div className="mt-4 flex justify-end">
               <button
+                type="button"
                 onClick={analyzeSelected}
                 className="flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700"
               >

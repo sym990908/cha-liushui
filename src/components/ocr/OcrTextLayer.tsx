@@ -13,6 +13,16 @@ function bboxBounds(bbox: [number, number][]) {
   }
 }
 
+/** 按框宽/框高估算字号，避免中文末字被挤到下一行 */
+function fitFontSize(text: string, width: number, height: number) {
+  const lines = text.split('\n')
+  const maxLineChars = Math.max(1, ...lines.map((line) => Array.from(line).length || 1))
+  const byHeight = height * 0.88
+  // CJK 近似方块字：字号约等于单字宽度
+  const byWidth = width / maxLineChars
+  return Math.max(8, Math.min(byHeight, byWidth, 36))
+}
+
 interface Props {
   blocks: OcrBlock[]
   naturalWidth: number
@@ -59,24 +69,33 @@ export function OcrTextLayer({
         const style = getConfidenceStyle(block.score)
         const isSelected = block.id === selectedBlockId
         const isHovered = block.id === hoveredBlockId
-        const fontSize = Math.max(10, Math.min(height * 0.75, 16))
+        const text = getBlockText(block)
+        const hasNewline = text.includes('\n')
+        const fontSize = fitFontSize(text, width, height)
 
         return (
           <textarea
             key={block.id}
-            value={getBlockText(block)}
+            value={text}
             onChange={(e) => onEditBlock(block.id, e.target.value)}
             onClick={() => onSelectBlock(block.id)}
             onFocus={() => onSelectBlock(block.id)}
             onMouseEnter={() => onHoverBlock(block.id)}
             onMouseLeave={() => onHoverBlock(undefined)}
-            className="absolute resize-none overflow-hidden border p-0.5 leading-tight outline-none"
+            rows={1}
+            className="absolute resize-none border outline-none"
             style={{
               left,
               top,
               width: Math.max(width, 24),
-              height: Math.max(height, fontSize + 4),
+              height: Math.max(height, fontSize + 2),
               fontSize,
+              lineHeight: 1,
+              padding: 0,
+              margin: 0,
+              boxSizing: 'border-box',
+              whiteSpace: hasNewline ? 'pre-wrap' : 'nowrap',
+              overflow: 'hidden',
               color: style.text,
               backgroundColor: isSelected || isHovered ? style.fill : `${style.fill}`,
               borderColor: isSelected ? '#2563eb' : style.border,

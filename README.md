@@ -80,6 +80,36 @@ npm run dev:netlify
 
 访问 http://localhost:8888
 
+## 本地便携版（免登录 · 一键启动）
+
+适合打包分发给他人，对方**无需安装 Node.js、无需登录、无需配置 API Key**。
+
+### 打包（开发者）
+
+1. 确保 `.env` 已填写 `SILICONFLOW_API_KEY` 和 `PADDLEOCR_TOKEN`（参考 `.env.portable.example`）
+2. 运行打包命令：
+
+```bash
+npm run package:portable
+```
+
+3. 输出文件：`release/flow-analysis-portable-win.zip`（约 200–350 MB）
+
+> **安全提示**：zip 内含 API 密钥，请为分发版单独申请密钥并设置用量上限，切勿提交到 Git。
+
+### 使用（接收方）
+
+1. 解压 zip 到任意文件夹
+2. 双击 `start.bat`
+3. 浏览器自动打开 http://localhost:8888，直接使用
+4. 关闭命令行窗口或双击 `stop.bat` 停止服务
+
+### 数据存储
+
+- 项目数据保存在**本机浏览器** localStorage 中，不上传云端
+- 换电脑或清除浏览器数据会导致数据丢失，建议定期导出 Excel/PDF 备份
+- OCR 原文件刷新后需重新上传（交易/报告等核心数据会保留）
+
 ## 部署到 Netlify
 
 ### 方式一：Git 连接

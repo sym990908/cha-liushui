@@ -139,7 +139,14 @@ export function useDualViewport(naturalWidth: number, naturalHeight: number) {
   const onPointerDown = useCallback((side: ViewportSide, e: React.PointerEvent) => {
     if (e.button !== 0 && e.button !== 1) return
     const target = e.target as HTMLElement
-    if (target.closest('textarea, input, button, a, [data-no-pan]')) return
+    // OCR 扫描框 / 可编辑控件不进入拖拽，避免抢走 click
+    if (
+      target.closest(
+        'textarea, input, button, a, [data-no-pan], [data-ocr-bbox], polygon, path',
+      )
+    ) {
+      return
+    }
     e.preventDefault()
     dragRef.current = { side, x: e.clientX, y: e.clientY }
     ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)

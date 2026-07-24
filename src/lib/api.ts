@@ -10,10 +10,10 @@ const OCR_SUBMIT_TIMEOUT_MS = 28_000
 const OCR_LONG_POLL_TIMEOUT_MS = 27_000
 const OCR_POLL_GAP_MS = 200
 
-/** PDF 默认 1× OCR */
-export const OCR_PDF_RENDER_SCALE = 1
-/** PDF 失败重试渲染倍率（1× + 压缩） */
-export const OCR_PDF_RETRY_RENDER_SCALE = 1
+/** PDF 默认 OCR 渲染倍率（与 pdfUtils.OCR_RENDER_SCALE 一致） */
+export const OCR_PDF_RENDER_SCALE = 2
+/** PDF 失败重试渲染倍率（仍用 2×，但会触发压缩上传） */
+export const OCR_PDF_RETRY_RENDER_SCALE = 2
 
 export interface OcrApiErrorBody {
   error: string

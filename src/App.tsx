@@ -80,6 +80,10 @@ function AppContent() {
         {state.currentStep === 2 && <Step2Structure />}
         {state.currentStep === 3 && <Step3Analysis />}
       </main>
+
+      <footer className="border-t border-slate-200 bg-white py-3 text-center text-xs text-slate-400">
+        数据保存在本机浏览器，不上传云端 · 无需登录
+      </footer>
     </div>
   )
 }

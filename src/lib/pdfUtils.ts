@@ -13,13 +13,15 @@ const pdfCache = new Map<string, PDFDocumentProxy>()
 const pageBaseCanvasCache = new Map<string, HTMLCanvasElement>()
 const pageBaseRenderInflight = new Map<string, Promise<HTMLCanvasElement>>()
 
-/** 预览渲染倍率（1×，与 OCR 坐标一致） */
-export const PDF_NATIVE_SCALE = 1
-/** OCR 上传默认倍率（1×，降低 Netlify 提交耗时） */
-export const OCR_RENDER_SCALE = 1
+/** 预览渲染倍率（与 OCR 默认倍率一致，保证 bbox 对齐） */
+export const PDF_NATIVE_SCALE = 2
+/** OCR 上传默认倍率（2×，避免扫描件被压糊） */
+export const OCR_RENDER_SCALE = 2
+/** 扫描件按内嵌图原生分辨率渲染时的上限，防止超大页撑爆内存 */
+export const PDF_MAX_NATIVE_SCALE = 4
 
-/** Netlify Function 请求体上限约 6MB，二进制有效约 4.5MB，留安全余量 */
-export const OCR_MAX_BYTES = 3_800_000
+/** Netlify Function 请求体上限约 6MB，二进制上传约 5.5MB，留安全余量 */
+export const OCR_MAX_BYTES = 5_000_000
 /** 失败重试 OCR：最长边与体积上限 */
 export const OCR_RETRY_MAX_LONG_EDGE = 2048
 export const OCR_RETRY_MAX_BYTES = 1_000_000
@@ -49,6 +51,9 @@ export interface OcrImagePayload {
   height: number
   renderScale: number
   compressed: boolean
+  /** 送检前四周白边（像素），映射 bbox 时需扣除 */
+  padX: number
+  padY: number
 }
 
 interface PdfImageData {
@@ -502,9 +507,25 @@ async function renderScanPdfPageCustom(
     if (resolved) imageCache.set(cacheKey, resolved)
   }
 
+  // 按全页图原生像素推算倍率，避免把高清扫描件画糊
+  let effectiveViewport = viewport
+  let nativeScale = viewport.scale
+  for (const op of paintOps) {
+    if (op.paintWidth < pageW * 0.85 || op.paintHeight < pageH * 0.85) continue
+    const resolved = imageCache.get(`${op.objId}:${op.isMask ? 'm' : 'i'}`)
+    if (!resolved || op.paintWidth <= 0 || op.paintHeight <= 0) continue
+    const sx = resolved.width / op.paintWidth
+    const sy = resolved.height / op.paintHeight
+    nativeScale = Math.max(nativeScale, sx, sy)
+  }
+  nativeScale = Math.min(PDF_MAX_NATIVE_SCALE, nativeScale)
+  if (nativeScale > viewport.scale + 0.01) {
+    effectiveViewport = page.getViewport({ scale: nativeScale, rotation: 0 })
+  }
+
   const canvas = document.createElement('canvas')
-  canvas.width = viewport.width
-  canvas.height = viewport.height
+  canvas.width = effectiveViewport.width
+  canvas.height = effectiveViewport.height
   const ctx = canvas.getContext('2d')
   if (!ctx) return null
 
@@ -519,7 +540,7 @@ async function renderScanPdfPageCustom(
 
     drawPdfImage(
       ctx,
-      viewport,
+      effectiveViewport,
       resolved.source,
       resolved.width,
       resolved.height,
@@ -568,12 +589,11 @@ export async function renderPageToCanvas(
     pageIndex,
   )
   const canvas = rotateCanvas(baseCanvas, rotation)
-  const viewport = page.getViewport({ scale, rotation })
 
   return {
     canvas,
-    naturalWidth: viewport.width,
-    naturalHeight: viewport.height,
+    naturalWidth: canvas.width,
+    naturalHeight: canvas.height,
     renderScale: scale,
   }
 }
@@ -639,6 +659,23 @@ function fitCanvasLongEdge(source: HTMLCanvasElement, maxLongEdge: number) {
   }
 }
 
+function padCanvasForOcr(
+  source: HTMLCanvasElement,
+  padRatio = 0.03,
+): { canvas: HTMLCanvasElement; padX: number; padY: number } {
+  const padX = Math.max(16, Math.round(source.width * padRatio))
+  const padY = Math.max(16, Math.round(source.height * padRatio))
+  const canvas = document.createElement('canvas')
+  canvas.width = source.width + padX * 2
+  canvas.height = source.height + padY * 2
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return { canvas: source, padX: 0, padY: 0 }
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  ctx.drawImage(source, padX, padY)
+  return { canvas, padX, padY }
+}
+
 export async function prepareCanvasForOcr(
   source: HTMLCanvasElement,
   filename: string,
@@ -649,6 +686,7 @@ export async function prepareCanvasForOcr(
   let renderScale = 1
   let compressed = false
   const byteLimit = options?.maxBytes ?? maxBytes
+  const allowCompress = Boolean(options?.maxLongEdge || options?.forceScale)
 
   if (options?.maxLongEdge) {
     const fitted = fitCanvasLongEdge(canvas, options.maxLongEdge)
@@ -665,27 +703,76 @@ export async function prepareCanvasForOcr(
     compressed = true
   }
 
-  const qualities = [0.92, 0.85, 0.78, 0.7, 0.62]
-  const scaleSteps = options?.forceScale ? [1] : [1, 0.9, 0.8, 0.7, 0.6, 0.5]
+  // 四周留白，减轻检测框贴边时末字/首字被裁
+  const padded = padCanvasForOcr(canvas)
+  canvas = padded.canvas
+  const { padX, padY } = padded
+
+  // 默认优先无损 PNG，避免 OCR / 预览被 JPEG 压糊
+  const pngBlob = await canvasToBlob(canvas, 'image/png')
+  if (pngBlob.size <= byteLimit) {
+    return {
+      blob: pngBlob,
+      filename: filename.replace(/\.(png|jpg|jpeg)$/i, '') + '.png',
+      mimeType: 'image/png',
+      width: canvas.width,
+      height: canvas.height,
+      renderScale,
+      compressed,
+      padX,
+      padY,
+    }
+  }
+
+  // 超限时先试高质量 JPEG；仍超限再轻微缩小（即使非重试也允许，避免直接失败）
+  const qualities = allowCompress ? [0.92, 0.85, 0.78, 0.7, 0.62] : [0.95, 0.92, 0.88]
+  const scaleSteps = allowCompress
+    ? options?.forceScale
+      ? [1]
+      : [1, 0.9, 0.8, 0.7, 0.6, 0.5]
+    : [1, 0.9, 0.8]
+
+  const contentW = Math.max(1, canvas.width - padX * 2)
+  const contentH = Math.max(1, canvas.height - padY * 2)
+  const contentCanvas = document.createElement('canvas')
+  contentCanvas.width = contentW
+  contentCanvas.height = contentH
+  contentCanvas.getContext('2d')!.drawImage(
+    canvas,
+    padX,
+    padY,
+    contentW,
+    contentH,
+    0,
+    0,
+    contentW,
+    contentH,
+  )
 
   for (const scaleFactor of scaleSteps) {
+    let work = contentCanvas
+    let workScale = renderScale
+
     if (scaleFactor < 1) {
-      canvas = resizeCanvas(source, scaleFactor)
-      renderScale = scaleFactor
+      work = resizeCanvas(contentCanvas, scaleFactor)
+      workScale = renderScale * scaleFactor
       compressed = true
     }
 
+    const repadded = padCanvasForOcr(work)
     for (const quality of qualities) {
-      const blob = await canvasToBlob(canvas, 'image/jpeg', quality)
+      const blob = await canvasToBlob(repadded.canvas, 'image/jpeg', quality)
       if (blob.size <= byteLimit) {
         return {
           blob,
           filename: filename.replace(/\.(png|jpg|jpeg)$/i, '') + '.jpg',
           mimeType: 'image/jpeg',
-          width: canvas.width,
-          height: canvas.height,
-          renderScale,
-          compressed,
+          width: repadded.canvas.width,
+          height: repadded.canvas.height,
+          renderScale: workScale,
+          compressed: compressed || scaleFactor < 1 || quality < 0.95,
+          padX: repadded.padX,
+          padY: repadded.padY,
         }
       }
     }
@@ -696,8 +783,9 @@ export async function prepareCanvasForOcr(
   )
 }
 
-export function canvasToBlobUrl(canvas: HTMLCanvasElement): string {
-  return canvas.toDataURL('image/jpeg', 0.85)
+export async function canvasToBlobUrl(canvas: HTMLCanvasElement): Promise<string> {
+  const blob = await canvasToBlob(canvas, 'image/png')
+  return URL.createObjectURL(blob)
 }
 
 export async function renderThumbnail(
@@ -733,9 +821,13 @@ export function mapBboxToPreview(
   ocrHeight: number,
   previewWidth: number,
   previewHeight: number,
+  padX = 0,
+  padY = 0,
 ): [number, number][] {
   if (!ocrWidth || !ocrHeight) return bbox
-  const sx = previewWidth / ocrWidth
-  const sy = previewHeight / ocrHeight
-  return bbox.map(([x, y]) => [x * sx, y * sy])
+  const contentW = Math.max(1, ocrWidth - padX * 2)
+  const contentH = Math.max(1, ocrHeight - padY * 2)
+  const sx = previewWidth / contentW
+  const sy = previewHeight / contentH
+  return bbox.map(([x, y]) => [(x - padX) * sx, (y - padY) * sy])
 }

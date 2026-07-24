@@ -7,11 +7,14 @@ export const optionalPayload = {
   useDocOrientationClassify: false,
   useDocUnwarping: false,
   useTextlineOrientation: false,
-  textDetLimitType: 'min',
-  textDetLimitSideLen: 64,
-  textDetThresh: 0.3,
-  textDetBoxThresh: 0.6,
-  textDetUnclipRatio: 1.5,
+  /** 按最长边限制；扫描件常用 2k+，1280 会过度缩小导致末字被裁 */
+  textDetLimitType: 'max',
+  textDetLimitSideLen: 2560,
+  textDetThresh: 0.2,
+  /** 略降阈值，保留更完整的文本连通域 */
+  textDetBoxThresh: 0.45,
+  /** 外扩检测框（官方建议末字被裁时提到 2.5+） */
+  textDetUnclipRatio: 2.8,
   textRecScoreThresh: 0,
 }
 

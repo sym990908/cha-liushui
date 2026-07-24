@@ -49,6 +49,7 @@ type Action =
   | { type: 'UPDATE_OCR_DOCUMENT'; fileId: string; updates: Partial<OcrDocument> }
   | { type: 'UPDATE_OCR_PAGE'; fileId: string; pageIndex: number; updates: Partial<OcrPage> }
   | { type: 'UPDATE_OCR_BLOCK'; fileId: string; pageIndex: number; blockId: string; editedText: string }
+  | { type: 'DELETE_OCR_BLOCK'; fileId: string; pageIndex: number; blockId: string }
   | { type: 'SET_ACTIVE_OCR_FILE'; fileId: string | undefined }
   | { type: 'SET_STATEMENT_TABLE'; fileId: string; table: StatementTable }
   | { type: 'START_PARSE_JOB'; fileId: string }
@@ -229,6 +230,21 @@ function reducer(state: AppState, action: Action): AppState {
                   blocks: p.blocks.map((b: OcrBlock) =>
                     b.id === action.blockId ? { ...b, editedText: action.editedText } : b,
                   ),
+                }
+              : p,
+          ),
+        })),
+      }
+    case 'DELETE_OCR_BLOCK':
+      return {
+        ...state,
+        ocrDocuments: updateOcrDoc(state.ocrDocuments, action.fileId, (d) => ({
+          ...d,
+          pages: d.pages.map((p) =>
+            p.pageIndex === action.pageIndex
+              ? {
+                  ...p,
+                  blocks: p.blocks.filter((b: OcrBlock) => b.id !== action.blockId),
                 }
               : p,
           ),
